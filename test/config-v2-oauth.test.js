@@ -201,4 +201,34 @@ describe('resolveSiteKey — multisite endpoint derivation (Issue #48)', () => {
       'https://sub.example.com/wp-json/mcp/abilities-mcp-adapter-default-server'
     );
   });
+
+  it('OAuth subsite derives endpoint path from liveMcpResource when provided (Issue #107)', () => {
+    const config = {
+      sites: {
+        wickedevolutions: {
+          url: 'https://wickedevolutions.com',
+          mcp_resource: 'https://wickedevolutions.com/wp-json/mcp/stale-adapter-route',
+          auth: {
+            method: 'oauth',
+            client_id: 'client-x',
+            access_token_ref: 'keychain://abilities-mcp/we/access',
+            refresh_token_ref: 'keychain://abilities-mcp/we/refresh',
+          },
+          auth_status: 'active',
+          multisite: {
+            community: 'https://community.wickedevolutions.com',
+          },
+        },
+      },
+    };
+    const r = resolveSiteKey(config, 'wickedevolutions.community', {
+      liveMcpResource: 'https://wickedevolutions.com/wp-json/mcp/abilities-mcp-adapter-default-server',
+    });
+    assert.equal(r.subsiteUrl, 'https://community.wickedevolutions.com');
+    assert.equal(
+      r.resolvedEndpoint,
+      'https://community.wickedevolutions.com/wp-json/mcp/abilities-mcp-adapter-default-server',
+      'subsite endpoint must combine operator-configured subsite origin with live-discovered route path'
+    );
+  });
 });
