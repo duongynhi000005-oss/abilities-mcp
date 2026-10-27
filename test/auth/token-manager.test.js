@@ -437,3 +437,88 @@ describe('TokenManager.buildPin (Appendix H.2.3)', () => {
     assert.ok(refreshed.lastConfirmedAt);
   });
 });
+
+describe('TokenManager.refresh — non-blocking keychain writes (#105)', () => {
+  it('#105 — keychain write failure/timeout after 200 OK is logged and non-fatal; refresh completes in-memory', async () => {
+    const server = await new MockAuthServer({
+      tokenJson: {
+        access_token: 'AT-fresh-105',
+        refresh_token: 'RT-fresh-105',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token_timeout: 7200,
+      },
+    }).start();
+    try {
+      const store = new MemorySecretStore();
+      await store.set(SECRET_SERVICE, 'siteA/access', 'AT-old');
+      await store.set(SECRET_SERVICE, 'siteA/refresh', 'RT-old');
+      store.set = async () => {
+        const err = new Error('security add-generic-password timed out after 5000ms');
+        err.code = 'security_cli_timeout';
+        throw err;
+      };
+
+      const warnings = [];
+      const tm = new TokenManager({
+        secretStore: store,
+        allowInsecure: true,
+        log: (msg) => warnings.push(msg),
+      });
+
+      const result = await tm.getAccessToken(buildSiteAuth({
+        tokenEndpoint: `${server.origin}/oauth/token`,
+        accessTokenExpiresAt: new Date(Date.now() + 60 * 1000).toISOString(),
+      }));
+
+      assert.equal(result.refreshed, true);
+      assert.equal(result.accessToken, 'AT-fresh-105');
+      assert.equal(result.updatedAuth._accessToken, 'AT-fresh-105');
+      assert.equal(result.updatedAuth._refreshToken, 'RT-fresh-105');
+      assert.equal(result.updatedAuth.persistenceDegraded, true);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /Keychain write failed.*continuing with in-memory credentials/);
+
+      // Subsequent getAccessToken uses the in-memory token without hitting
+      // the token endpoint or failing on the un-updated keychain entry.
+      const followUp = await tm.getAccessToken(result.updatedAuth);
+      assert.equal(followUp.refreshed, false);
+      assert.equal(followUp.accessToken, 'AT-fresh-105');
+      assert.equal(server._refreshAttempts, 1);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it('#105 — skips redundant keychain writes during refresh when access/refresh tokens are unchanged', async () => {
+    const server = await new MockAuthServer({
+      tokenJson: {
+        access_token: 'AT-same',
+        refresh_token: 'RT-same',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token_timeout: 7200,
+      },
+    }).start();
+    try {
+      const store = new MemorySecretStore();
+      await store.set(SECRET_SERVICE, 'siteA/access', 'AT-same');
+      await store.set(SECRET_SERVICE, 'siteA/refresh', 'RT-same');
+      let setCalls = 0;
+      const origSet = store.set.bind(store);
+      store.set = async (...args) => {
+        setCalls += 1;
+        return origSet(...args);
+      };
+
+      const tm = new TokenManager({ secretStore: store, allowInsecure: true });
+      const { tokens } = await tm.refresh(buildSiteAuth({
+        tokenEndpoint: `${server.origin}/oauth/token`,
+      }));
+      assert.equal(tokens.access_token, 'AT-same');
+      assert.equal(setCalls, 0, 'no keychain write when both access and refresh tokens match stored values');
+    } finally {
+      await server.stop();
+    }
+  });
+});

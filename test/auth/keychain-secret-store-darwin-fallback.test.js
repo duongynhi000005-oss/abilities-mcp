@@ -343,6 +343,62 @@ describe('KeychainSecretStore — darwin security-CLI dispatch (#39 + #61)', () 
         && /Unsupported ABILITIES_MCP_KEYCHAIN_BACKEND/.test(err.message)
     );
   });
+
+  it('#105 — skips redundant security add-generic-password write when the secret is unchanged', async () => {
+    const harness = fakeSecurityExec({
+      'abilities-mcp|siteA/access': 'AT-UNCHANGED',
+    });
+    const store = new KeychainSecretStore({
+      requireKeytar: REJECT_KEYTAR,
+      platform: 'darwin',
+      exec: harness.exec,
+    });
+
+    // Read populates the known-secret cache.
+    assert.equal(await store.get('abilities-mcp', 'siteA/access'), 'AT-UNCHANGED');
+    assert.equal(harness.calls.filter((c) => c.args[0] === 'add-generic-password').length, 0);
+
+    // Setting the same value is a no-op (no add-generic-password spawned).
+    await store.set('abilities-mcp', 'siteA/access', 'AT-UNCHANGED');
+    assert.equal(harness.calls.filter((c) => c.args[0] === 'add-generic-password').length, 0);
+
+    // Setting a changed value spawns add-generic-password once; a second
+    // identical set is skipped again.
+    await store.set('abilities-mcp', 'siteA/access', 'AT-NEW');
+    await store.set('abilities-mcp', 'siteA/access', 'AT-NEW');
+    assert.equal(harness.calls.filter((c) => c.args[0] === 'add-generic-password').length, 1);
+  });
+
+  it('#105 — checkKeychainReady returns true when unlocked and throws security_cli_locked on lock', async () => {
+    const unlockedStore = new KeychainSecretStore({
+      requireKeytar: REJECT_KEYTAR,
+      platform: 'darwin',
+      exec: (file, args, _opts, cb) => {
+        assert.equal(file, '/usr/bin/security');
+        assert.deepEqual(args, ['show-keychain-info']);
+        cb(null, '', 'Keychain "login.keychain" no-timeout\n');
+      },
+    });
+    const ready = await unlockedStore.checkKeychainReady();
+    assert.equal(ready, true);
+
+    const lockedStore = new KeychainSecretStore({
+      requireKeytar: REJECT_KEYTAR,
+      platform: 'darwin',
+      exec: (_file, _args, _opts, cb) => {
+        cb(Object.assign(new Error('exit 36'), {
+          code: 36,
+          stderr: 'security: SecKeychainCopySettings: User interaction is not allowed.\n',
+          stdout: '',
+        }));
+      },
+    });
+    await assert.rejects(
+      lockedStore.checkKeychainReady(),
+      (err) => err && err.code === 'security_cli_locked'
+        && /User interaction is not allowed/.test(err.message)
+    );
+  });
 });
 
 describe('KeychainSecretStore — non-darwin keytar failure still throws (#39)', () => {

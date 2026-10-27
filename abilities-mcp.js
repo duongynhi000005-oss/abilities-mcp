@@ -129,8 +129,11 @@ if (!isSubcommandInvocation) {
           log(`Migrated wp-sites.json v1 → v2 (${result.liftedCount} secret(s) lifted; backup: ${result.backupPath})`);
         }
       } catch (err) {
-        process.stderr.write(`abilities-mcp: schema migration failed: ${err.message}\n`);
-        process.exit(1);
+        // Issue #105: never gate boot on a secret-store write failure during
+        // opportunistic v1->v2 migration. `loadConfig` still supports v1 files
+        // directly when migration cannot write to Keychain.
+        process.stderr.write(`abilities-mcp: warning: schema migration skipped (${err.message}); continuing boot\n`);
+        log(`Schema migration warning (continuing with existing config): ${err.message}`);
       }
     }
 

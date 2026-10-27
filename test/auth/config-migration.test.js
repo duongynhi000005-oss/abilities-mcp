@@ -222,3 +222,29 @@ describe('config-migration.migrateFile', () => {
     fs.unlinkSync(`${file}.v1.bak`);
   });
 });
+
+describe('config-migration.migrateConfig — skip redundant writes (#105)', () => {
+  it('#105 — skips redundant secretStore.set when the existing keychain secret matches', async () => {
+    const legacy = {
+      sites: {
+        mysite: {
+          url: 'https://example.com',
+          transport: 'http',
+          http: { endpoint: 'https://example.com/x', username: 'u', password: 'P' },
+        },
+      },
+    };
+    const store = new MemorySecretStore();
+    await store.set('abilities-mcp', 'mysite/apppassword', 'P');
+    let setCalls = 0;
+    const origSet = store.set.bind(store);
+    store.set = async (...a) => {
+      setCalls += 1;
+      return origSet(...a);
+    };
+
+    const { config } = await migrateConfig(legacy, { secretStore: store });
+    assert.equal(setCalls, 0, 'no redundant keychain write when password already matches');
+    assert.deepEqual(validate(config), { ok: true });
+  });
+});
