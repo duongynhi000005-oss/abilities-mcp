@@ -948,4 +948,72 @@ describe('ConnectionPool — Issue #103 Component B: live-discovered resource pr
     assert.notEqual(transport.endpoint, liveResource,
       'live-discovered resource must NOT override an operator-derived subsite endpoint');
   });
+
+  it('Issue #106: when Component B overrides to live resource, same-host subsite dedup still reuses parent transport', async () => {
+    const persistedResource = 'https://example.com/wp-json/mcp/old-adapter';
+    const liveResource = 'https://example.com/wp-json/mcp/abilities-mcp-adapter-default-server';
+
+    const store = new MemorySecretStore();
+    await store.set(SECRET_SERVICE, 'siteA/access', 'AT');
+    await store.set(SECRET_SERVICE, 'siteA/refresh', 'RT');
+    const tm = new TokenManager({ secretStore: store, allowInsecure: true });
+
+    const config = {
+      defaultSite: 'siteA',
+      sites: {
+        siteA: {
+          url: 'https://example.com',
+          mcp_resource: persistedResource,
+          auth: {
+            method: 'oauth',
+            client_id: 'client-x',
+            access_token_ref: makeRef(SECRET_SERVICE, 'siteA/access'),
+            refresh_token_ref: makeRef(SECRET_SERVICE, 'siteA/refresh'),
+            access_token_expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+            refresh_token_expires_at: new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString(),
+          },
+          auth_status: 'active',
+          multisite: {
+            main: 'https://example.com',
+            community: 'https://community.example.com',
+          },
+        },
+      },
+    };
+
+    const discover = async (siteUrl) => ({
+      asMetadata: {
+        issuer: siteUrl,
+        token_endpoint: `${siteUrl}/oauth/token`,
+        authorization_endpoint: `${siteUrl}/oauth/authorize`,
+      },
+      asMetadataUrl: `${siteUrl}/.well-known/oauth-authorization-server`,
+      prMetadata: { resource: liveResource },
+      prMetadataUrl: `${siteUrl}/.well-known/oauth-protected-resource`,
+      probeResults: [],
+    });
+
+    const pool = new ConnectionPool(config, () => {}, {
+      secretStore: store, tokenManager: tm, discover, allowInsecure: true,
+    });
+
+    const parentTransport = await pool.getTransport('siteA');
+    assert.equal(parentTransport.endpoint, liveResource,
+      'parent transport uses live-discovered resource via Component B');
+
+    // Same-host subsite (`siteA.main`) must dedupe to the parent transport
+    const existingMain = pool._findExistingHttpTransport('siteA.main');
+    assert.ok(existingMain, 'expected _findExistingHttpTransport to find parent transport for same-host subsite');
+    assert.equal(existingMain.key, 'siteA');
+    assert.strictEqual(existingMain.transport, parentTransport);
+
+    const mainTransport = await pool.getTransport('siteA.main');
+    assert.strictEqual(mainTransport, parentTransport,
+      'getTransport for same-host subsite must reuse parent transport when Component B overrode stale mcp_resource');
+
+    // Distinct-host subsite (`siteA.community`) must NOT dedupe to parent
+    const existingCommunity = pool._findExistingHttpTransport('siteA.community');
+    assert.equal(existingCommunity, null,
+      'distinct-host subsite must not dedupe onto parent transport');
+  });
 });
