@@ -95,4 +95,52 @@ describe('LoopbackServer', () => {
     );
     await server.stop();
   });
+
+  it('retries on EACCES (Windows reserved/excluded dynamic port range) and succeeds on a free port (#119)', async () => {
+    const server = new LoopbackServer({
+      expectedState: generateState(),
+      bindRetries: 3,
+    });
+    let listenCalls = 0;
+    const realListen = server._listen.bind(server);
+    server._listen = async (port) => {
+      listenCalls++;
+      if (listenCalls <= 2) {
+        const err = new Error(`listen EACCES: permission denied 127.0.0.1:${port}`);
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realListen(port);
+    };
+
+    const { port } = await server.start();
+    assert.equal(listenCalls, 3, 'should retry after EACCES and succeed on 3rd attempt');
+    assert.ok(port >= PORT_MIN && port <= PORT_MAX);
+    await server.stop();
+  });
+
+  it('does not retry on non-retryable bind errors (e.g. EADDRNOTAVAIL) and reports actual attempt count (#119)', async () => {
+    const server = new LoopbackServer({
+      expectedState: generateState(),
+      bindRetries: 5,
+    });
+    let listenCalls = 0;
+    server._listen = async (port) => {
+      listenCalls++;
+      const err = new Error(`listen EADDRNOTAVAIL: address not available 127.0.0.1:${port}`);
+      err.code = 'EADDRNOTAVAIL';
+      throw err;
+    };
+
+    await assert.rejects(
+      server.start(),
+      (err) => {
+        assert.equal(err.code, 'loopback_bind_failed');
+        assert.match(err.message, /after 1 attempts/);
+        assert.equal(err.cause && err.cause.code, 'EADDRNOTAVAIL');
+        return true;
+      }
+    );
+    assert.equal(listenCalls, 1, 'non-retryable error must abort immediately on attempt 1');
+  });
 });
