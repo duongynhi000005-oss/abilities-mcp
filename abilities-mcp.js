@@ -223,9 +223,16 @@ if (!isSubcommandInvocation) {
     // surfaces per-call errors on non-bridge tools/call) instead of dying
     // with the malformed-InitializeResult / EOF symptom that motivated #76.
     try {
-      const transport = await pool.connectDefault((parsedMsg, rawLine) => {
-        router.handleTransportMessage(parsedMsg, rawLine);
-      });
+      const transport = await pool.connectDefault(
+        (parsedMsg, rawLine) => {
+          router.handleTransportMessage(parsedMsg, rawLine);
+        },
+        {
+          onBackgroundConnect: async (siteId, bgTransport) => {
+            await router.upgradeFromDegradedMode(bgTransport, siteId);
+          },
+        }
+      );
       if (transport) {
         router.setDefaultTransport(transport);
         log(`Default transport connected: ${config.defaultSite}`);

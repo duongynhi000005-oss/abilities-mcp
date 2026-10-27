@@ -949,3 +949,67 @@ describe('ConnectionPool — Issue #103 Component B: live-discovered resource pr
       'live-discovered resource must NOT override an operator-derived subsite endpoint');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #108 — Bounded boot / lazy connect so hanging sites can't delay degraded mode
+// ---------------------------------------------------------------------------
+
+describe('ConnectionPool.connectDefault — bounded boot deadline (#108)', () => {
+  it('#108 — hanging site triggers degraded mode within bootTimeoutMs, then upgrades in background when connect finishes', async () => {
+    let resolveHangingSite;
+    const hangingPromise = new Promise((resolve) => { resolveHangingSite = resolve; });
+
+    const config = {
+      defaultSite: 'hangingSite',
+      sites: {
+        hangingSite: {
+          url: 'https://hanging.example.com',
+          auth: { method: 'oauth' },
+          auth_status: 'active',
+        },
+        secondSite: {
+          url: 'https://second.example.com',
+          auth: { method: 'oauth' },
+          auth_status: 'active',
+        },
+      },
+    };
+
+    const backgroundEvents = [];
+    const pool = new ConnectionPool(config, () => {}, { bootTimeoutMs: 40 });
+    pool._createTransport = async (siteId) => ({
+      siteId,
+      onMessage: null,
+      connect: async () => {
+        if (siteId === 'hangingSite') await hangingPromise;
+      },
+      send: () => {},
+      shutdown: async () => {},
+      isReady: () => true,
+    });
+
+    const start = Date.now();
+    const bootResult = await pool.connectDefault(() => {}, {
+      bootTimeoutMs: 40,
+      onBackgroundConnect: (siteId, transport) => {
+        backgroundEvents.push({ siteId, transport });
+      },
+    });
+    const elapsedMs = Date.now() - start;
+
+    assert.equal(bootResult, null, 'connectDefault returns null when bootTimeoutMs expires');
+    assert.ok(elapsedMs < 1000, `boot deadline resolved quickly (elapsed ${elapsedMs}ms)`);
+    assert.equal(config.sites.hangingSite.auth_status, 'expired');
+    assert.match(config.sites.hangingSite._degraded_reason, /connect timed out after 40ms/);
+    assert.equal(backgroundEvents.length, 0);
+
+    // Now let the hanging site finish connecting in the background.
+    resolveHangingSite();
+    await pool._backgroundBootPromise;
+
+    assert.equal(backgroundEvents.length, 1);
+    assert.equal(backgroundEvents[0].siteId, 'hangingSite');
+    assert.equal(config.sites.hangingSite.auth_status, 'active', 'restored to active on background connect');
+    assert.equal(config.sites.hangingSite._degraded_reason, undefined);
+  });
+});

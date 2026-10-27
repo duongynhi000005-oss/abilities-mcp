@@ -526,3 +526,73 @@ describe('McpRouter — drainEarlyQueue in degraded boot (#102a)', () => {
     assert.equal(sent.length, 0, 'non-JSON line skipped silently');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #108 — upgradeFromDegradedMode when background connect completes
+// ---------------------------------------------------------------------------
+
+describe('McpRouter — upgradeFromDegradedMode (#108)', () => {
+  it('#108 — answers initialize in degraded mode before boot deadline, then upgrades and emits notifications/tools/list_changed when background connect completes', async () => {
+    const sent = [];
+    const handshakes = [];
+    const forwarded = [];
+    const config = { defaultSite: 'siteA', sites: { siteA: {}, siteB: {} } };
+
+    const router = new McpRouter({
+      config,
+      siteKeys: ['siteA', 'siteB'],
+      isMultiSite: true,
+      pool: { setHandshakeCache() {} },
+      catalog: { isEnabled: () => false, cacheTools() {}, getFilteredTools: () => [] },
+      sendToClient: (s) => sent.push(s),
+      log: () => {},
+    });
+
+    // Boot deadline expired while sites were still connecting → enter degraded mode
+    // and drain early-queued initialize + initialized.
+    router.enterDegradedMode([
+      { siteId: 'siteA', reason: 'connect timed out after 40ms at boot (continuing in background)' },
+      { siteId: 'siteB', reason: 'connect timed out after 40ms at boot (continuing in background)' },
+    ]);
+    router.earlyQueue.push(JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {} },
+    }));
+    router.earlyQueue.push(JSON.stringify({
+      jsonrpc: '2.0', method: 'notifications/initialized',
+    }));
+    router.drainEarlyQueue();
+
+    assert.equal(sent.length, 1, 'degraded initialize answered immediately');
+    const initResp = JSON.parse(sent[0]);
+    assert.equal(initResp.id, 1);
+    assert.equal(initResp.result.protocolVersion, '2025-06-18');
+    assert.equal(router.degraded, true);
+
+    // Background connect completes for siteB.
+    const bgTransport = {
+      performHandshake: async (initReq, initNotif) => {
+        handshakes.push({ initReq, initNotif });
+      },
+      send: (line) => forwarded.push(line),
+    };
+    await router.upgradeFromDegradedMode(bgTransport, 'siteB');
+
+    assert.equal(router.degraded, false, 'router exited degraded mode');
+    assert.deepEqual(router.degradedSites, []);
+    assert.equal(router.config.defaultSite, 'siteB');
+    assert.equal(handshakes.length, 1, 'cached initialize handshake replayed on background transport');
+    assert.equal(handshakes[0].initReq.id, 1);
+
+    // Client received notifications/tools/list_changed.
+    const notif = JSON.parse(sent[sent.length - 1]);
+    assert.equal(notif.method, 'notifications/tools/list_changed');
+
+    // Subsequent tools/call routes to the upgraded transport instead of returning a degraded error.
+    const callLine = JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/list',
+    });
+    router.handleClientMessage(JSON.parse(callLine), callLine);
+    assert.equal(forwarded.length, 1);
+  });
+});
